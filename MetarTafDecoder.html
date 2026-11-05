@@ -38,10 +38,14 @@
            border-bottom: 1px solid #6d4aff; padding-bottom: 3px; font-size: 15px; }
     .sec:first-child { margin-top: 0; }
     .err { color: #ff6b6b; font-weight: bold; }
+    .diag { font-family: Consolas, monospace; font-size: 12px; color: #ccc;
+            background: #16213e; border: 1px solid #2a2a4a; border-radius: 6px;
+            padding: 8px; margin-top: 8px; white-space: pre-wrap; font-weight: normal; }
     .ok { color: #7bd88f; }
     .example { font-size: 12px; color: #888; margin-top: 4px; }
     .btnrow { margin-top: 4px; }
     .btnlabel { font-size: 12px; color: #888; }
+    code { background: #16213e; padding: 1px 4px; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -71,8 +75,7 @@
     Staat er een geldige code in het invulvakje, dan gaat die voor; is het vakje leeg, dan wordt het gekozen vliegveld gebruikt.<br>
     Je kunt ook gewoon handmatig een METAR of TAF plakken; de Decoderen-knop herkent zelf welke van de twee het is.<br>
     Let op: niet alle kleine velden leveren een TAF; dan blijft het antwoord leeg.<br>
-    Meerdere rapporten tegelijk worden niet ondersteund (&#233;&#233;n per keer).<br><br>
-    Werkt het ophalen niet? Klik dan opnieuw: de app probeert eerst rechtstreeks en anders automatisch via een omleidingsserver. Lukt het nog steeds niet, plak de code dan handmatig vanaf aviationweather.gov.</div>
+    Meerdere rapporten tegelijk worden niet ondersteund (&#233;&#233;n per keer).</div>
     <div id="output" class="output"></div>
 </div>
 
@@ -545,13 +548,46 @@ function decodeTaf(raw) {
 // ===== Actueel ophalen =====
 
 const API_BASE = "https://aviationweather.gov/api/data/";
-// Publieke CORS-proxies als alternatieve route, mocht de directe verbinding
-// door de browser geblokkeerd worden (CORS). Wordt pas na een mislukte
-// directe poging geprobeerd, in deze volgorde.
-const PROXIES = [
-    u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
-    u => "https://corsproxy.io/?url=" + encodeURIComponent(u)
+
+// Routes om de data op te halen. Eerst rechtstreeks (werkt zodra de pagina
+// op een echte webserver staat), daarna via publieke omleidingsservers.
+// Publieke proxies wisselen regelmatig van beschikbaarheid; vandaar
+// meerdere routes en een diagnose-overzicht bij een storing.
+const ROUTES = [
+    { name: "rechtstreeks", make: u => u },
+    { name: "corsproxy.io", make: u => "https://corsproxy.io/?url=" + encodeURIComponent(u) },
+    { name: "codetabs", make: u => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u) },
+    { name: "allorigins", make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) }
 ];
+
+// Probeert de routes in volgorde. Geeft de tekst van de eerste succesvolle
+// route terug, of gooit een fout met per-route diagnose-overzicht.
+async function fetchTextWithFallback(url) {
+    const verslagen = [];
+
+    for (const route of ROUTES) {
+        try {
+            const resp = await fetch(route.make(url));
+            if (resp.ok) {
+                const text = await resp.text();
+                if (text && text.trim() !== "") {
+                    verslagen.push(route.name + ": OK");
+                    window.__laatsteRoutes = verslagen;
+                    return text;
+                }
+                verslagen.push(route.name + ": leeg antwoord (HTTP " + resp.status + ")");
+            } else {
+                verslagen.push(route.name + ": HTTP-status " + resp.status);
+            }
+        } catch (e) {
+            const msg = (e && e.message) ? e.message : String(e);
+            verslagen.push(route.name + ": " + msg);
+        }
+    }
+
+    window.__laatsteRoutes = verslagen;
+    throw new Error(verslagen.join("\n"));
+}
 
 // Nederlandse vliegvelden, gesplitst in burgerluchtvaart en militair.
 const NL_CIVIL = [
@@ -631,28 +667,6 @@ function getCurrentStation() {
     return "EHAM";
 }
 
-// Haalt tekst op: eerst rechtstreeks, daarna (bij CORS-/netwerkproblemen)
-// automatisch via de proxies uit de lijst hierboven.
-async function fetchTextWithFallback(url) {
-    let lastErr = null;
-    try {
-        const resp = await fetch(url);
-        if (resp.ok) return await resp.text();
-        throw new Error("HTTP-status " + resp.status);
-    } catch (e) {
-        lastErr = e;
-    }
-    for (const makeProxyUrl of PROXIES) {
-        try {
-            const resp = await fetch(makeProxyUrl(url));
-            if (resp.ok) return await resp.text();
-        } catch (e) {
-            lastErr = e;
-        }
-    }
-    throw lastErr;
-}
-
 async function fetchAviation(station, kind) {
     const out = document.getElementById("output");
     const inp = document.getElementById("metarInput");
@@ -698,13 +712,12 @@ async function fetchAviation(station, kind) {
         out.innerHTML = "<div class='example'>" + bron + "</div>" + out.innerHTML;
     } catch (e) {
         const msg = (e && e.message) ? e.message : String(e);
-        out.innerHTML = "<span class='err'>Kon geen verbinding maken: " + escapeHtml(msg) +
-            "<br><br>Dit komt meestal doordat de browser het ophalen vanaf een lokale pagina " +
-            "beveiligt (CORS). Mogelijke oplossingen:<br>" +
-            "&#8226; Zet het bestand op een webserver (bijv. GitHub Pages of een eigen site), dan werkt het rechtstreeks.<br>" +
-            "&#8226; Of gebruik de pagina via een klein lokaal serverprogramma, bijv.: <code>python -m http.server</code> " +
-            "in de map van het bestand, en open dan http://localhost:8000/<br>" +
-            "&#8226; Of plak de METAR/TAF handmatig vanaf aviationweather.gov.</span>";
+        out.innerHTML = "<span class='err'>Ophalen mislukt \u2014 diagnose per route:</span>" +
+            "<div class='diag'>" + escapeHtml(msg) + "</div>" +
+            "<div class='example'>Lukt het opnieuw proberen niet, dan kun je de METAR/TAF ook handmatig " +
+            "plakken vanaf aviationweather.gov (knop 'Add to favorites' niet nodig \u2014 kopieer de tekstregel).<br>" +
+            "Tip voor het rapporteren van dit probleem: druk op F12 \u2192 tabblad Console en kijk bij " +
+            "roodgekleurde regels welke netwerkfout precies wordt genoemd.</div>";
     } finally {
         btnMetar.disabled = false;
         btnTaf.disabled = false;
