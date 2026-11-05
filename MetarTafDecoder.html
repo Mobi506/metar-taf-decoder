@@ -25,7 +25,7 @@
     select, input.icao { font-family: Consolas, monospace; font-size: 14px;
              background: #16213e; color: #fff; border: 1px solid #6d4aff;
              border-radius: 6px; padding: 8px; }
-    select { min-width: 300px; max-width: 100%; }
+    select { min-width: 320px; max-width: 100%; }
     select:focus, input.icao:focus { outline: none; border-color: #9b7bff; }
     input.icao { width: 120px; text-transform: uppercase; }
     .output { margin-top: 20px; }
@@ -61,7 +61,15 @@
         <span class="btnlabel">Actueel ophalen:</span><br>
         <div class="picker">
             <label>Nederlands vliegveld:</label>
-            <select id="airportSelect"></select>
+            <select id="airportSelect">
+                <option value="EHAM">EHAM &#8212; Amsterdam Airport Schiphol</option>
+                <option value="EHRD">EHRD &#8212; Rotterdam The Hague Airport</option>
+                <option value="EHEH">EHEH &#8212; Eindhoven Airport</option>
+                <option value="EHBK">EHBK &#8212; Maastricht Aachen Airport</option>
+                <option value="EHGG">EHGG &#8212; Groningen Airport Eelde</option>
+                <option value="EHLE">EHLE &#8212; Lelystad Airport</option>
+                <option value="EHKD">EHKD &#8212; Vliegveld De Kooy (Den Helder)</option>
+            </select>
         </div>
         <div class="picker">
             <label>Eigen ICAO-code (heeft voorrang):</label>
@@ -71,10 +79,10 @@
         <button id="btnFetchMetar" onclick="fetchSelected('metar')">&#9992; METAR ophalen</button>
         <button id="btnFetchTaf" class="taf" onclick="fetchSelected('taf')">&#9992; TAF ophalen</button>
     </div>
-    <div class="example">Kies een vliegveld uit de lijst of typ een eigen ICAO-code (4 letters) en klik daarna op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
+    <div class="example">Kies een vliegveld uit de lijst, of typ een eigen ICAO-code (4 letters) en klik daarna op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
     Staat er een geldige code in het invulvakje, dan gaat die voor; is het vakje leeg, dan wordt het gekozen vliegveld gebruikt.<br>
+    Windsnelheden in knopen worden naast km/u ook in m/s weergegeven.<br>
     Je kunt ook gewoon handmatig een METAR of TAF plakken; de Decoderen-knop herkent zelf welke van de twee het is.<br>
-    Let op: niet alle kleine velden leveren een TAF (of zelfs een METAR); dan blijft het antwoord leeg.<br>
     E&eacute;n rapport tegelijk.</div>
     <div id="output" class="output"></div>
 </div>
@@ -156,6 +164,9 @@ function decodeTempValue(s) {
 
 function ktToKmh(kt) { return Math.round(kt * 1.852); }
 
+// Knopen naar meter per seconde, met 1 decimaal (1 kt = 0,5144 m/s).
+function ktToMs(kt) { return (kt * 0.514444).toFixed(1); }
+
 function degreesToCompass(deg) {
     const dirs = ["N","NNO","ONO","O","OZO","ZZO","Z","ZZW","WZW","W","WNW","NNW","N"];
     return dirs[Math.round(deg / 30) % 12];
@@ -227,11 +238,11 @@ function decodeMetar(raw) {
             desc = "Wind vanuit " + wm[1] + "\u00b0 (" + degreesToCompass(parseInt(wm[1], 10)) + ")";
         }
         desc += ", " + speedVal + " " + unitName;
-        if (wm[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u)";
+        if (wm[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u, ~" + ktToMs(speedVal) + " m/s)";
         if (wm[4]) {
             const gust = parseInt(wm[4], 10);
             desc += ", vlagen tot " + gust + " " + unitName;
-            if (wm[5] == "KT") desc += " (~" + ktToKmh(gust) + " km/u)";
+            if (wm[5] == "KT") desc += " (~" + ktToKmh(gust) + " km/u, ~" + ktToMs(gust) + " m/s)";
         }
         lines.push({ code: w, desc: desc });
         idx++;
@@ -360,7 +371,11 @@ function decodeMetar(raw) {
         } else {
             let extra = "";
             const wm2 = tok.match(/^(\d{3}|VRB)(\d{2,3})KT$/);
-            if (wm2) extra = "wind " + (wm2[1]=="VRB"?"variabel":wm2[1]+"\u00b0") + " op " + wm2[2] + " knopen";
+            if (wm2) {
+                const spd = parseInt(wm2[2], 10);
+                extra = "wind " + (wm2[1]=="VRB"?"variabel":wm2[1]+"\u00b0") + " op " + spd +
+                        " knopen (~" + ktToKmh(spd) + " km/u, ~" + ktToMs(spd) + " m/s)";
+            }
             else if (/^\d{4}$/.test(tok)) extra = "zicht " + (tok=="9999"?"10 km of meer":parseInt(tok,10)+" m");
             else {
                 const cw = decodeCloudGroup(tok);
@@ -395,8 +410,12 @@ function tafDecodeToken(tok) {
             desc = "Wind vanuit " + d[1] + "\u00b0 (" + degreesToCompass(parseInt(d[1], 10)) + ")";
         }
         desc += ", " + speedVal + " " + unitName;
-        if (d[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u)";
-        if (d[4]) desc += ", vlagen tot " + parseInt(d[4], 10) + " " + unitName;
+        if (d[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u, ~" + ktToMs(speedVal) + " m/s)";
+        if (d[4]) {
+            const gust = parseInt(d[4], 10);
+            desc += ", vlagen tot " + gust + " " + unitName;
+            if (d[5] == "KT") desc += " (~" + ktToKmh(gust) + " km/u, ~" + ktToMs(gust) + " m/s)";
+        }
         return desc;
     }
 
@@ -547,8 +566,8 @@ function decodeTaf(raw) {
 
 // ===== Actueel ophalen =====
 
-// Route 1 (beste): JSON-bestanden met actuele METARs/TAFs van alle
-// Nederlandse vliegvelden, elke 30 minuten bijgewerkt door de
+// Route 1 (beste): JSON-bestanden met actuele METARs/TAFs van de 7
+// geselecteerde vliegvelden, elke 30 minuten bijgewerkt door de
 // GitHub Actions-workflow. Zelfde domein als deze pagina, dus altijd
 // toegestaan - geen CORS-problemen.
 // Route 2 (alleen METAR, elke ICAO-code): metar.vatsim.net - browser-vriendelijk.
@@ -556,8 +575,6 @@ function decodeTaf(raw) {
 const VATSIM_METAR = "https://metar.vatsim.net/";
 const AW_API_BASE = "https://aviationweather.gov/api/data/";
 
-// Nederlandse vliegvelden, gesplitst in burgerluchtvaart en militair.
-// De workflow haalt al deze codes in één keer op.
 const NL_CIVIL = [
     { code: "EHAM", name: "Amsterdam Airport Schiphol" },
     { code: "EHRD", name: "Rotterdam The Hague Airport" },
@@ -575,28 +592,6 @@ const PROXY_ROUTES = [
     { name: "codetabs", make: u => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u) },
     { name: "allorigins", make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) }
 ];
-
-// Genereert de opties voor de keuzelijst in de pagina
-function fillAirportSelect() {
-    const sel = document.getElementById("airportSelect");
-    if (!sel) return;
-    let html = "";
-
-    html += "<optgroup label='Burgerluchtvaart'>";
-    for (const a of NL_CIVIL) {
-        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
-    }
-    html += "</optgroup>";
-
-    html += "<optgroup label='Militair'>";
-    for (const a of NL_MILITARY) {
-        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
-    }
-    html += "</optgroup>";
-
-    sel.innerHTML = html;
-    sel.value = "EHAM";
-}
 
 // Cache-buster zodat de browser niet een oud JSON-bestand gebruikt.
 function bustCache(url) {
@@ -647,18 +642,13 @@ async function haalUitWorkflowJson(bestand, station) {
 }
 
 function stationNaam(station) {
-    for (const a of NL_CIVIL) {
-        if (a.code == station) return a.name + " (" + station + ")";
-    }
-    for (const a of NL_MILITARY) {
-        if (a.code == station) return a.name + " (" + station + ")";
-    }
+    if (STATION_NAMEN[station]) return STATION_NAMEN[station] + " (" + station + ")";
     return station;
 }
 
 // Bepaalt welk station opgehaald wordt:
 // 1. het vrije invoervakje als daarin een geldige ICAO-code staat
-// 2. anders de keuzelijst met Nederlandse vliegvelden
+// 2. anders de keuzelijst
 function getCurrentStation() {
     const inp = document.getElementById("icaoInput");
     let val = "";
@@ -771,7 +761,7 @@ function doDecode() {
 
 function doExampleMetar() {
     document.getElementById("metarInput").value =
-        "EHAM 041325Z 06016KT 030V100 9999 FEW022 10/05 Q1030 NOSIG";
+        "EHAM 041325Z 06016G25KT 030V100 9999 FEW022 10/05 Q1030 NOSIG";
     doDecode();
 }
 
@@ -783,10 +773,6 @@ function doExampleTaf() {
         "FM051200 9999 SCT020 TX12/0415Z TN04/0503Z";
     doDecode();
 }
-
-window.addEventListener("load", function() {
-    fillAirportSelect();
-});
 </script>
 </body>
 </html>
