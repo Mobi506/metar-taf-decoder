@@ -60,8 +60,11 @@
     <div class="btnrow">
         <span class="btnlabel">Actueel ophalen:</span><br>
         <div class="picker">
-            <label>Nederlands vliegveld:</label>
-            <select id="airportSelect"></select>
+            <label>Vliegveld:</label>
+            <select id="airportSelect">
+                <option value="EHAM">EHAM &#8212; Amsterdam Airport Schiphol</option>
+                <option value="EHRD">EHRD &#8212; Rotterdam The Hague Airport</option>
+            </select>
         </div>
         <div class="picker">
             <label>Eigen ICAO-code (heeft voorrang):</label>
@@ -71,11 +74,10 @@
         <button id="btnFetchMetar" onclick="fetchSelected('metar')">&#9992; METAR ophalen</button>
         <button id="btnFetchTaf" class="taf" onclick="fetchSelected('taf')">&#9992; TAF ophalen</button>
     </div>
-    <div class="example">Kies een vliegveld uit de lijst of typ een eigen ICAO-code (4 letters) en klik daarna op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
+    <div class="example">Kies Schiphol of Rotterdam, of typ een eigen ICAO-code (4 letters) en klik op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
     Staat er een geldige code in het invulvakje, dan gaat die voor; is het vakje leeg, dan wordt het gekozen vliegveld gebruikt.<br>
     Je kunt ook gewoon handmatig een METAR of TAF plakken; de Decoderen-knop herkent zelf welke van de twee het is.<br>
-    Let op: de automatische ophaaldata (rechts) geldt momenteel alleen voor Nederlandse vliegvelden; voor buitenlandse codes werkt de handmatige modus altijd.<br>
-    Meerdere rapporten tegelijk worden niet ondersteund (&#233;&#233;n per keer).</div>
+    E&eacute;n rapport tegelijk.</div>
     <div id="output" class="output"></div>
 </div>
 
@@ -517,7 +519,7 @@ function decodeTaf(raw) {
             header = (tok == "TEMPO") ? "Tijdelijke fluctuaties:" : "Verandert geleidelijk in:";
             idx++;
             if (tokens[idx] && /^\d{4}\/\d{4}$/.test(tokens[idx])) {
-                header += " (" + fmtTafPeriod(tokens[idx]) + ")");
+                header += " (" + fmtTafPeriod(tokens[idx]) + ")";
                 idx++;
             }
         } else {
@@ -547,14 +549,18 @@ function decodeTaf(raw) {
 
 // ===== Actueel ophalen =====
 
-// Route 1 (beste): de JSON-bestanden met actuele METARs/TAFs die door de
-// GitHub Actions-workflow (.github/workflows/update-weather.yml) elke
-// 30 minuten in deze repository worden bijgewerkt. Zelfde domein als
-// deze pagina, dus altijd en overal toegestaan - geen CORS-problemen.
-// Route 2 (alleen METAR): metar.vatsim.net - browser-vriendelijk.
-// Route 3 (reserve): FAA API via publieke proxies (onbetrouwbaar).
+// Route 1 (beste): JSON-bestanden met actuele METARs/TAFs van EHAM en EHRD,
+// elke 30 minuten bijgewerkt door de GitHub Actions-workflow. Zelfde domein
+// als deze pagina, dus altijd toegestaan - geen CORS-problemen.
+// Route 2 (alleen METAR, elke ICAO-code): metar.vatsim.net - browser-vriendelijk.
+// Route 3 (reserve, elke ICAO-code): FAA API via publieke proxies (onbetrouwbaar).
 const VATSIM_METAR = "https://metar.vatsim.net/";
 const AW_API_BASE = "https://aviationweather.gov/api/data/";
+
+const STATION_NAMEN = {
+    "EHAM": "Amsterdam Airport Schiphol",
+    "EHRD": "Rotterdam The Hague Airport"
+};
 
 const PROXY_ROUTES = [
     { name: "codetabs", make: u => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u) },
@@ -609,74 +615,14 @@ async function haalUitWorkflowJson(bestand, station) {
     return raw;
 }
 
-// Nederlandse vliegvelden, gesplitst in burgerluchtvaart en militair.
-const NL_CIVIL = [
-    { code: "EHAM", name: "Amsterdam Airport Schiphol" },
-    { code: "EHRD", name: "Rotterdam The Hague Airport" },
-    { code: "EHEH", name: "Eindhoven Airport" },
-    { code: "EHBK", name: "Maastricht Aachen Airport" },
-    { code: "EHGG", name: "Groningen Airport Eelde" },
-    { code: "EHLE", name: "Lelystad Airport" },
-    { code: "EHTW", name: "Twente Airport (Enschede)" },
-    { code: "EHSE", name: "Breda International Airport (Seppe)" },
-    { code: "EHAL", name: "Ameland Airport" },
-    { code: "EHTX", name: "Texel International Airport" },
-    { code: "EHHO", name: "Hoogeveen Airport" },
-    { code: "EHDR", name: "Drachten Airfield" },
-    { code: "EHOW", name: "Oostwold Airport" },
-    { code: "EHTE", name: "Teuge Airport" },
-    { code: "EHHV", name: "Hilversum Airport" },
-    { code: "EHBD", name: "Kempen Airport (Budel)" },
-    { code: "EHMZ", name: "Midden-Zeeland Airport" },
-    { code: "EHTL", name: "Terlet Airfield (zweefvliegveld)" }
-];
-
-const NL_MILITARY = [
-    { code: "EHGR", name: "Vliegbasis Gilze-Rijen" },
-    { code: "EHVK", name: "Vliegbasis Volkel" },
-    { code: "EHLW", name: "Vliegbasis Leeuwarden" },
-    { code: "EHWO", name: "Vliegbasis Woensdrecht" },
-    { code: "EHKD", name: "Vliegveld De Kooy (Den Helder)" },
-    { code: "EHDL", name: "Vliegbasis Deelen" },
-    { code: "EHDP", name: "De Peel (Venray)" },
-    { code: "EHMC", name: "Nieuw-Milligen (AOCS)" }
-];
-
-// Genereert de opties voor de keuzelijst in de pagina
-function fillAirportSelect() {
-    const sel = document.getElementById("airportSelect");
-    if (!sel) return;
-    let html = "";
-
-    html += "<optgroup label='Burgerluchtvaart'>";
-    for (const a of NL_CIVIL) {
-        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
-    }
-    html += "</optgroup>";
-
-    html += "<optgroup label='Militair'>";
-    for (const a of NL_MILITARY) {
-        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
-    }
-    html += "</optgroup>";
-
-    sel.innerHTML = html;
-    sel.value = "EHAM";
-}
-
 function stationNaam(station) {
-    for (const a of NL_CIVIL) {
-        if (a.code == station) return a.name + " (" + station + ")";
-    }
-    for (const a of NL_MILITARY) {
-        if (a.code == station) return a.name + " (" + station + ")";
-    }
+    if (STATION_NAMEN[station]) return STATION_NAMEN[station] + " (" + station + ")";
     return station;
 }
 
 // Bepaalt welk station opgehaald wordt:
 // 1. het vrije invoervakje als daarin een geldige ICAO-code staat
-// 2. anders de keuzelijst met Nederlandse vliegvelden
+// 2. anders de keuzelijst (EHAM/EHRD)
 function getCurrentStation() {
     const inp = document.getElementById("icaoInput");
     let val = "";
@@ -749,7 +695,7 @@ async function fetchAviation(station, kind) {
         inp.value = data;
         doDecode();
         const bron = (soort == "TAF")
-            ? "Opgehaald (FAA/NWS-databron; kan tussentijds gewijzigd/amended worden)."
+            ? "Opgehaald (FAA/NWS-databron; een TAF is een verwachting en kan tussentijds gewijzigd/amended worden)."
             : "Opgehaald (NOAA-databron). Let op: de METAR kan tot ca. 10 minuten oud zijn.";
         out.innerHTML = "<div class='example'>" + bron + "</div>" + out.innerHTML;
     } catch (e) {
@@ -757,7 +703,7 @@ async function fetchAviation(station, kind) {
         out.innerHTML = "<span class='err'>Ophalen mislukt \u2014 diagnose per route:</span>" +
             "<div class='diag'>" + escapeHtml([verslagen.join("\n"), msg].join("\n")) + "</div>" +
             "<div class='example'>Lukt opnieuw proberen niet, plak de " + escapeHtml(soort) +
-            " dan handmatig: ga naar aviationweather.gov en kopieer de tekstregel in het invoerveld hierboven.</div>";
+            " dan handmatig in het invoerveld hierboven en klik op Decoderen.</div>";
     } finally {
         btnMetar.disabled = false;
         btnTaf.disabled = false;
@@ -801,10 +747,6 @@ function doExampleTaf() {
         "FM051200 9999 SCT020 TX12/0415Z TN04/0503Z";
     doDecode();
 }
-
-window.addEventListener("load", function() {
-    fillAirportSelect();
-});
 </script>
 </body>
 </html>
