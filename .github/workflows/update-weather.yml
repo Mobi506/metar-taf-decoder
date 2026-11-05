@@ -1,9 +1,10 @@
 name: METAR/TAF bijwerken
 
 # Haalt elk half uur de actuele METARs en TAFs op van aviationweather.gov
-# (server-zijde, dus zonder CORS-beperkingen) voor EHAM en EHRD, en slaat
-# ze op als metars.json en tafs.json in de repo. De decoder op GitHub
-# Pages leest die bestanden rechtstreeks (zelfde domein, altijd toegestaan).
+# (server-zijde, dus zonder CORS-beperkingen) voor alle Nederlandse
+# vliegvelden, en slaat ze op als metars.json en tafs.json in de repo.
+# De decoder op GitHub Pages leest die bestanden rechtstreeks
+# (zelfde domein, altijd toegestaan).
 #
 # Plaats dit bestand in je repository als:
 #   .github/workflows/update-weather.yml
@@ -32,18 +33,21 @@ jobs:
           set -e
           UA="metar-taf-decoder/1.0 (GitHub Actions)"
 
+          # Alle Nederlandse vliegvelden: burger + militair.
+          # Kleine velden leveren niet altijd een METAR/TAF; ontbrekende
+          # codes verschijnen dan simpelweg niet in de JSON-bestanden.
+          STATIONS="EHAM,EHRD,EHEH,EHBK,EHGG,EHLE,EHTW,EHSE,EHAL,EHTX,EHHO,EHDR,EHOW,EHTE,EHHV,EHBD,EHMZ,EHTL,EHGR,EHVK,EHLW,EHWO,EHKD,EHDL,EHDP,EHMC"
+
           fetch() {
             soort="$1"
             bestand="$2"
             for poging in 1 2 3; do
               code=$(curl -sS --max-time 60 -A "$UA" -w '%{http_code}' -o "$bestand" \
-                "https://aviationweather.gov/api/data/${soort}?ids=EHAM,EHRD&format=raw") \
+                "https://aviationweather.gov/api/data/${soort}?ids=${STATIONS}&format=raw") \
                 || code="000"
               echo ">> ophalen ${soort}, poging ${poging}: HTTP ${code}"
               if [ "$code" = "200" ]; then
-                echo ">> de eerste regels van ${bestand}:"
-                head -c 500 "$bestand"
-                echo ""
+                echo ">> aantal regels in ${bestand}: $(wc -l < "$bestand")"
                 return 0
               fi
               sleep 5
