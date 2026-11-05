@@ -1,20 +1,19 @@
-name: METAR/TAF data bijwerken
+name: METAR/TAF bijwerken
 
 # Haalt elk half uur de actuele METARs en TAFs op van aviationweather.gov
-# (server-zijde, dus zonder CORS-beperkingen) en slaat ze op als tafs.json
-# en metars.json in de repo. De decoder op GitHub Pages leest die
-# bestanden vervolgens rechtstreeks (zelfde domein, altijd toegestaan).
+# (server-zijde, dus zonder CORS-beperkingen) voor EHAM en EHRD, en slaat
+# ze op als metars.json en tafs.json in de repo. De decoder op GitHub
+# Pages leest die bestanden rechtstreeks (zelfde domein, altijd toegestaan).
 #
 # Plaats dit bestand in je repository als:
 #   .github/workflows/update-weather.yml
-# (in GitHub: Add file -> Create new file, typ de naam met slash erin)
 #
-# Let op: de eerste keer start je hem handmatig via het tabblad
-# "Actions" in je repository -> workflow kiezen -> "Run workflow".
+# De eerste keer (of na elke wijziging) start je hem handmatig via:
+#   Actions-tabblad -> "METAR/TAF bijwerken" -> "Run workflow"
+# Faalt iets, klap de rode stap open en lees de logregels.
 
 on:
   schedule:
-    # Elke 30 minuten (GitHub tijd, UTC). Minimale.delay ~5-15 min is normaal.
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
@@ -28,44 +27,86 @@ jobs:
       - name: Repository ophalen
         uses: actions/checkout@v4
 
-      - name: METARs en TAFs ophalen
+      - name: Ruwe METARs en TAFs ophalen
+        run: |
+          set -e
+          UA="metar-taf-decoder/1.0 (GitHub Actions)"
+
+          fetch() {
+            soort="$1"
+            bestand="$2"
+            for poging in 1 2 3; do
+              code=$(curl -sS --max-time 60 -A "$UA" -w '%{http_code}' -o "$bestand" \
+                "https://aviationweather.gov/api/data/${soort}?ids=EHAM,EHRD&format=raw") \
+                || code="000"
+              echo ">> ophalen ${soort}, poging ${poging}: HTTP ${code}"
+              if [ "$code" = "200" ]; then
+                echo ">> de eerste regels van ${bestand}:"
+                head -c 500 "$bestand"
+                echo ""
+                return 0
+              fi
+              sleep 5
+            done
+            echo "!! ophalen ${soort} is na 3 pogingen mislukt (laatste HTTP ${code})"
+            return 1
+          }
+
+          fetch metar metars_raw.txt
+          fetch taf tafs_raw.txt
+
+      - name: Omzetten naar JSON-bestanden
         run: |
           python3 - <<'EOF'
-          import json, urllib.request
+          import json, re, sys
 
-          # Nederlandse vliegvelden (burger + militair). Vul gericht aan,
-          # of voeg buitenlandse codes toe die je vaak gebruikt.
-          stations = [
-              "EHAM", "EHRD", "EHEH", "EHBK", "EHGG", "EHLE", "EHTW", "EHSE",
-              "EHAL", "EHTX", "EHHO", "EHDR", "EHOW", "EHTE", "EHHV", "EHBD",
-              "EHMZ", "EHTL",
-              "EHGR", "EHVK", "EHLW", "EHWO", "EHKD", "EHDL", "EHDP", "EHMC"
-          ]
-          base = "https://aviationweather.gov/api/data/"
+          def parse_metars(path):
+              d = {}
+              with open(path, encoding="utf-8") as f:
+                  for line in f:
+                      s = line.strip()
+                      if not s:
+                          continue
+                      u = s.upper()
+                      if u.startswith("METAR ") or u.startswith("SPECI "):
+                          s = s.split(" ", 1)[1]
+                          u = s.upper()
+                      m = re.match(r"^([A-Z]{4})\s+\d{6}Z", u)
+                      if m:
+                          d[m.group(1)] = s
+              return d
 
-          def haal(soort):
-              url = base + soort + "?ids=" + ",".join(stations) + "&format=json"
-              req = urllib.request.Request(url, headers={"User-Agent": "metar-taf-decoder/1.0"})
-              with urllib.request.urlopen(req, timeout=60) as r:
-                  data = json.load(r)
-              result = {}
-              for item in data.get("data", []):
-                  icao = item.get("icao", "")
-                  raw = item.get("rawText", "")
-                  if icao and raw:
-                      result[icao] = raw
-              return result
+          def parse_tafs(path):
+              d = {}
+              cur = None
+              with open(path, encoding="utf-8") as f:
+                  for line in f:
+                      s = line.strip()
+                      if not s:
+                          continue
+                      u = s.upper()
+                      m = re.match(r"^(?:TAF\s+)?(?:(?:AMD|COR)\s+)?([A-Z]{4})\s+\d{6}Z", u)
+                      if m:
+                          cur = m.group(1)
+                          d[cur] = s
+                      elif cur:
+                          d[cur] += "\n" + s
+              return d
 
-          metars = haal("metar")
-          tafs = haal("taf")
+          metars = parse_metars("metars_raw.txt")
+          tafs = parse_tafs("tafs_raw.txt")
 
-          with open("metars.json", "w") as f:
+          print(">> METARs gevonden voor:", sorted(metars.keys()))
+          print(">> TAFs gevonden voor:", sorted(tafs.keys()))
+
+          if not metars:
+              print("!! geen enkele METAR geparseerd; afbreken")
+              sys.exit(1)
+
+          with open("metars.json", "w", encoding="utf-8") as f:
               json.dump(metars, f, ensure_ascii=False, indent=1)
-          with open("tafs.json", "w") as f:
+          with open("tafs.json", "w", encoding="utf-8") as f:
               json.dump(tafs, f, ensure_ascii=False, indent=1)
-
-          print("METARs opgehaald:", len(metars))
-          print("TAFs opgehaald:", len(tafs))
           EOF
 
       - name: Wijzigingen committen
