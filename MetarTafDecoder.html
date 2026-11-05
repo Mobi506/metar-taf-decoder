@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>METAR/TAF Decoder</title>
+<style>
+    body { font-family: "Segoe UI", Arial, sans-serif; background: #1a1a2e; color: #e0e0e0;
+           padding: 20px; margin: 0; }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { font-size: 18px; color: #6d4aff; margin-top: 0; }
+    textarea { width: 100%; box-sizing: border-box; height: 80px; font-family: Consolas, monospace;
+               font-size: 14px; background: #16213e; color: #fff;
+               border: 1px solid #6d4aff; border-radius: 6px; padding: 8px; resize: vertical; }
+    textarea:focus { outline: none; border-color: #9b7bff; }
+    button { background: #6d4aff; color: white; border: none; border-radius: 6px;
+             padding: 10px 20px; font-size: 14px; cursor: pointer; margin-top: 10px;
+             margin-right: 6px; }
+    button:hover { background: #9b7bff; }
+    button:disabled { background: #444; cursor: wait; }
+    button.taf { background: #3a5a9b; }
+    button.taf:hover { background: #5679c4; }
+    .picker { display: inline-block; margin-top: 10px; margin-right: 8px; vertical-align: bottom; }
+    .picker label { display: block; font-size: 12px; color: #888; margin-bottom: 3px; }
+    select, input.icao { font-family: Consolas, monospace; font-size: 14px;
+             background: #16213e; color: #fff; border: 1px solid #6d4aff;
+             border-radius: 6px; padding: 8px; }
+    select { min-width: 300px; max-width: 100%; }
+    select:focus, input.icao:focus { outline: none; border-color: #9b7bff; }
+    input.icao { width: 120px; text-transform: uppercase; }
+    .output { margin-top: 20px; }
+    .row { display: flex; margin-bottom: 6px; border-bottom: 1px solid #2a2a4a; padding: 5px 0; }
+    .row.sub { margin-left: 20px; }
+    .code { width: 130px; flex-shrink: 0; font-family: Consolas, monospace;
+            color: #9b7bff; font-weight: bold; }
+    .desc { flex-grow: 1; }
+    .sec { margin-top: 16px; color: #9b7bff; font-weight: bold;
+           border-bottom: 1px solid #6d4aff; padding-bottom: 3px; font-size: 15px; }
+    .sec:first-child { margin-top: 0; }
+    .err { color: #ff6b6b; font-weight: bold; }
+    .ok { color: #7bd88f; }
+    .example { font-size: 12px; color: #888; margin-top: 4px; }
+    .btnrow { margin-top: 4px; }
+    .btnlabel { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>&#9729;&#65039; METAR / TAF Decoder</h1>
+    <p>Plak hieronder de ruwe code en klik op <strong>Decoderen</strong>. Een METAR en een TAF worden automatisch herkend:</p>
+    <textarea id="metarInput" spellcheck="false" placeholder="Bijv. EHAM 041325Z 06016KT 030V100 9999 FEW022 10/05 Q1030 NOSIG, of een TAF die met 'TAF' begint"></textarea>
+    <br>
+    <button onclick="doDecode()">Decoderen</button>
+    <button onclick="doExampleMetar()">Voorbeeld METAR</button>
+    <button onclick="doExampleTaf()">Voorbeeld TAF</button>
+    <div class="btnrow">
+        <span class="btnlabel">Actueel ophalen (aviationweather.gov):</span><br>
+        <div class="picker">
+            <label>Nederlands vliegveld:</label>
+            <select id="airportSelect"></select>
+        </div>
+        <div class="picker">
+            <label>Eigen ICAO-code (heeft voorrang):</label>
+            <input type="text" id="icaoInput" class="icao" maxlength="4" placeholder="bijv. LFPG">
+        </div>
+        <br>
+        <button id="btnFetchMetar" onclick="fetchSelected('metar')">&#9992; METAR ophalen</button>
+        <button id="btnFetchTaf" class="taf" onclick="fetchSelected('taf')">&#9992; TAF ophalen</button>
+    </div>
+    <div class="example">Kies een vliegveld uit de lijst of typ een eigen ICAO-code (4 letters) en klik daarna op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
+    Staat er een geldige code in het invulvakje, dan gaat die voor; is het vakje leeg, dan wordt het gekozen vliegveld gebruikt.<br>
+    Je kunt ook gewoon handmatig een METAR of TAF plakken; de Decoderen-knop herkent zelf welke van de twee het is.<br>
+    Let op: niet alle kleine velden leveren een TAF; dan blijft het antwoord leeg.<br>
+    Meerdere rapporten tegelijk worden niet ondersteund (&#233;&#233;n per keer).<br><br>
+    Werkt het ophalen niet? Klik dan opnieuw: de app probeert eerst rechtstreeks en anders automatisch via een omleidingsserver. Lukt het nog steeds niet, plak de code dan handmatig vanaf aviationweather.gov.</div>
+    <div id="output" class="output"></div>
+</div>
+
+<script>
+// ===== Woordenboeken =====
+
+const WEATHER_INTENSITY = {
+    "-": "licht ", "+": "hevig ", "VC": "in de omgeving "
+};
+
+const WEATHER_DESCR = {
+    "MI": "ondiep", "PR": "gedeeltelijk", "BC": "banken", "DR": "opwaaiend",
+    "BL": "blaasend", "SH": "buien", "TS": "onweer", "FZ": "aanvriezend"
+};
+
+const WEATHER_PHEN = {
+    "DZ": "motregen", "RA": "regen", "SN": "sneeuw", "SG": "korrelsneeuw",
+    "IC": "ijsnaalden", "PL": "ijskorrels", "GR": "hagel", "GS": "kleine hagel",
+    "UP": "onbekende neerslag", "BR": "nevel", "FG": "mist",
+    "FU": "rook", "VA": "vulkanische as", "DU": "stof", "SA": "zand",
+    "HZ": "droge nevel", "PY": "opwaaiend stof", "PO": "stof/sand whirls",
+    "SQ": "squalls", "FC": "wolkentrekker/funnel cloud", "SS": "zandstorm",
+    "DS": "zware zandstorm"
+};
+
+const CLOUD_COVER = {
+    "SKC": "helder, geen wolken",
+    "CLR": "helder, geen wolken",
+    "NSC": "geen significante wolken",
+    "FEW": "weinig wolken (1-2 oktas)",
+    "SCT": "verspreide wolken (3-4 oktas)",
+    "BKN": "bewolkt (5-7 oktas)",
+    "OVC": "geheel bewolkt (8 oktas)"
+};
+
+// ===== Hulpfuncties =====
+
+function decodeWeatherGroup(token) {
+    let desc = "";
+    let i = 0;
+    if (token.charAt(0) == "-" || token.charAt(0) == "+") {
+        desc += WEATHER_INTENSITY[token.charAt(0)];
+        i = 1;
+    } else if (token.substring(0, 2) == "VC") {
+        desc += WEATHER_INTENSITY["VC"];
+        i = 2;
+    }
+    let rest = token.substring(i);
+    const parts = [];
+    while (rest.length >= 2 && WEATHER_DESCR[rest.substring(0, 2)]) {
+        parts.push(WEATHER_DESCR[rest.substring(0, 2)]);
+        rest = rest.substring(2);
+    }
+    while (rest.length >= 2 && WEATHER_PHEN[rest.substring(0, 2)]) {
+        parts.push(WEATHER_PHEN[rest.substring(0, 2)]);
+        rest = rest.substring(2);
+    }
+    if (rest.length > 0) return null;
+    return desc + parts.join(" met ");
+}
+
+function decodeCloudGroup(token) {
+    const m = token.match(/^(FEW|SCT|BKN|OVC)(\d{3})(CB|TCU)?$/);
+    if (!m) return null;
+    const cover = CLOUD_COVER[m[1]];
+    const heightFt = parseInt(m[2], 10) * 100;
+    const heightM = Math.round(heightFt * 0.3048);
+    const extra = m[3] ? (m[3] == "CB" ? " (cumulonimbus/onweerswolken!)" : " (towering cumulus)") : "";
+    return cover + " op " + heightFt + " voet (~" + heightM + " m)" + extra;
+}
+
+function decodeTempValue(s) {
+    let neg = false;
+    if (s.charAt(0) == "M") { neg = true; s = s.substring(1); }
+    const v = parseInt(s, 10);
+    return neg ? -v : v;
+}
+
+function ktToKmh(kt) { return Math.round(kt * 1.852); }
+
+function degreesToCompass(deg) {
+    const dirs = ["N","NNO","ONO","O","OZO","ZZO","Z","ZZW","WZW","W","WNW","NNW","N"];
+    return dirs[Math.round(deg / 30) % 12];
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// Periode "ddhh/ddhh" leesbaar maken (voor TAF-geldigheid en TEMPO/BECMG-periodes)
+function fmtTafPeriod(p) {
+    const m = p.match(/^(\d{2})(\d{2})\/(\d{2})(\d{2})$/);
+    if (!m) return p;
+    return "dag " + m[1] + " " + m[2] + ":00 UTC t/m dag " + m[3] + " " + m[4] + ":00 UTC";
+}
+
+// ===== Uitvoer-rendering (gedeeld door METAR en TAF) =====
+
+function buildRows(lines) {
+    let html = "";
+    for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (l.sec) {
+            html += "<div class='sec'>" + escapeHtml(l.desc) + "</div>";
+        } else {
+            html += "<div class='row" + (l.sub ? " sub" : "") + "'><div class='code'>" +
+                    escapeHtml(l.code) + "</div><div class='desc'>" +
+                    escapeHtml(l.desc) + "</div></div>";
+        }
+    }
+    return html;
+}
+
+// ===== Hoofddecodering METAR =====
+
+function decodeMetar(raw) {
+    const lines = [];
+    let text = raw.replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+    if (text == "") return "";
+
+    if (/^(METAR|SPECI)\b/i.test(text)) text = text.replace(/^(METAR|SPECI)\s*/i, "");
+
+    const tokens = text.split(" ");
+    let idx = 0;
+
+    // 1. Station
+    const station = tokens[idx++];
+    lines.push({ code: station, desc: "ICAO-vliegveldcode" });
+
+    // 2. Tijdstip
+    const t = tokens[idx];
+    const tm = t.match(/^(\d{2})(\d{2})(\d{2})Z$/);
+    if (tm) {
+        lines.push({ code: t, desc: "Waarneming op dag " + tm[1] +
+            " van de maand, om " + tm[2] + ":" + tm[3] + " UTC" });
+        idx++;
+    }
+
+    // 3. Wind
+    const w = tokens[idx];
+    const wm = w && w.match(/^(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?(KT|MPS|KMH)$/);
+    if (wm) {
+        const unitName = wm[5] == "KT" ? "knopen" : (wm[5] == "MPS" ? "m/s" : "km/u");
+        const speedVal = parseInt(wm[2], 10);
+        let desc;
+        if (wm[1] == "VRB") {
+            desc = "Variabele windrichting";
+        } else {
+            desc = "Wind vanuit " + wm[1] + "\u00b0 (" + degreesToCompass(parseInt(wm[1], 10)) + ")";
+        }
+        desc += ", " + speedVal + " " + unitName;
+        if (wm[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u)";
+        if (wm[4]) {
+            const gust = parseInt(wm[4], 10);
+            desc += ", vlagen tot " + gust + " " + unitName;
+            if (wm[5] == "KT") desc += " (~" + ktToKmh(gust) + " km/u)";
+        }
+        lines.push({ code: w, desc: desc });
+        idx++;
+
+        // 3b. Variatie windrichting
+        const vr = tokens[idx];
+        if (vr && /^(\d{3})V(\d{3})$/.test(vr)) {
+            const m2 = vr.match(/^(\d{3})V(\d{3})$/);
+            lines.push({ code: vr, desc: "Windrichting varieert tussen " + m2[1] + "\u00b0 en " + m2[2] + "\u00b0" });
+            idx++;
+        }
+    }
+
+    // 4. Zichtbaarheid
+    const vis = tokens[idx];
+    if (vis == "CAVOK") {
+        lines.push({ code: vis, desc: "CAVOK: helder weer, zicht 10 km of meer, geen wolken onder 5000 ft" });
+        idx++;
+    } else if (vis && /^\d{4}$/.test(vis)) {
+        const v = parseInt(vis, 10);
+        if (v == 9999) {
+            lines.push({ code: vis, desc: "Zichtbaarheid 10 km of meer" });
+        } else {
+            lines.push({ code: vis, desc: "Zichtbaarheid " + v + " meter" });
+        }
+        idx++;
+    } else if (vis && /SM$/.test(vis)) {
+        lines.push({ code: vis, desc: "Zichtbaarheid " + vis.replace("SM", " statute miles") });
+        idx++;
+    }
+
+    // 5. RVR (baanzichtbaarheid), bijv. R24/6000
+    while (tokens[idx] && /^R\d{2}[LCR]?\/(P|M)?\d{4}(V\d{4})?(FT)?$/.test(tokens[idx])) {
+        const rvr = tokens[idx];
+        const rm = rvr.match(/^R(\d{2})([LCR]?)\/(P|M)?(\d{4})/);
+        const baan = "baan " + rm[1] + (rm[2]=="L"?" links":(rm[2]=="R"?" rechts":(rm[2]=="C"?" centraal":"")));
+        const prefix = rm[3] == "P" ? "meer dan " : (rm[3] == "M" ? "minder dan " : "");
+        lines.push({ code: rvr, desc: "RVR " + baan + ": " + prefix + rm[4] + " meter" });
+        idx++;
+    }
+
+    // 6. Weerverschijnselen (herhalen zolang herkend)
+    let wxDone = false;
+    while (idx < tokens.length && !wxDone) {
+        const tok = tokens[idx];
+        if (tok == "NOSIG" || tok == "TEMPO" || tok == "BECMG" ||
+            /^(FEW|SCT|BKN|OVC|SKC|CLR|NSC)/.test(tok) ||
+            /^\d{2}\/\d{2}$/.test(tok) || /^M?\d{2}\/M?\d{2}$/.test(tok) ||
+            /^Q\d{4}$/.test(tok) || /^A\d{4}$/.test(tok) ||
+            tok == "//" || /^\/\/\//.test(tok)) {
+            wxDone = true;
+        } else {
+            const d = decodeWeatherGroup(tok);
+            if (d) {
+                lines.push({ code: tok, desc: "Weerverschijnsel: " + d });
+                idx++;
+            } else {
+                wxDone = true;
+            }
+        }
+    }
+
+    // 7. Wolken
+    while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok == "NOSIG" || tok == "TEMPO" || tok == "BECMG") break;
+        if (/^\d{2}\/\d{2}$/.test(tok) || /^M?\d{2}\/M?\d{2}$/.test(tok)) break;
+        if (/^Q\d{4}$/.test(tok) || /^A\d{4}$/.test(tok)) break;
+
+        if (tok == "SKC" || tok == "CLR" || tok == "NSC") {
+            lines.push({ code: tok, desc: CLOUD_COVER[tok] });
+            idx++;
+        } else if (tok == "//////" || tok == "///") {
+            lines.push({ code: tok, desc: "Wolkengroep: onbekende/niet gemeten wolken" });
+            idx++;
+        } else {
+            const c = decodeCloudGroup(tok);
+            if (c) {
+                lines.push({ code: tok, desc: c });
+                idx++;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 8. Temperatuur en dauwpunt
+    const td = tokens[idx];
+    const tdm = td && td.match(/^(M?\d{2})\/(M?\d{2})$/);
+    if (tdm) {
+        const temp = decodeTempValue(tdm[1]);
+        const dew = decodeTempValue(tdm[2]);
+        const spread = temp - dew;
+        let spreadDesc = "";
+        if (spread <= 1) spreadDesc = " (zeer kleine spreiding: kans op mist/nevel)";
+        else if (spread <= 3) spreadDesc = " (kleine spreiding)";
+        lines.push({ code: td, desc: "Temperatuur " + temp + "\u00b0C, dauwpunt " + dew +
+            "\u00b0C (spreiding " + spread + "\u00b0C)" + spreadDesc });
+        idx++;
+    }
+
+    // 9. Luchtdruk
+    const q = tokens[idx];
+    const qm = q && q.match(/^Q(\d{4})$/);
+    if (qm) {
+        lines.push({ code: q, desc: "Luchtdruk (QNH): " + parseInt(qm[1], 10) + " hPa" });
+        idx++;
+    } else {
+        const am = q && q.match(/^A(\d{4})$/);
+        if (am) {
+            const inhg = parseInt(am[1], 10) / 100;
+            lines.push({ code: q, desc: "Luchtdruk (QNH): " + inhg.toFixed(2) + " inch Hg (VS-standaard)" });
+            idx++;
+        }
+    }
+
+    // 10. Trend
+    while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok == "NOSIG") {
+            lines.push({ code: tok, desc: "Geen significante veranderingen verwacht" });
+        } else if (tok == "TEMPO") {
+            lines.push({ code: tok, desc: "Tijdelijke fluctuaties verwacht:" });
+        } else if (tok == "BECMG") {
+            lines.push({ code: tok, desc: "Wordt verwacht te veranderen in:" });
+        } else {
+            let extra = "";
+            const wm2 = tok.match(/^(\d{3}|VRB)(\d{2,3})KT$/);
+            if (wm2) extra = "wind " + (wm2[1]=="VRB"?"variabel":wm2[1]+"\u00b0") + " op " + wm2[2] + " knopen";
+            else if (/^\d{4}$/.test(tok)) extra = "zicht " + (tok=="9999"?"10 km of meer":parseInt(tok,10)+" m");
+            else {
+                const cw = decodeCloudGroup(tok);
+                const ww = decodeWeatherGroup(tok);
+                if (cw) extra = cw;
+                else if (ww) extra = ww;
+                else extra = tok;
+            }
+            lines.push({ code: tok, desc: "\u2192 " + extra });
+        }
+        idx++;
+    }
+
+    return buildRows(lines);
+}
+
+// ===== Hoofddecodering TAF =====
+
+// Duidt een los conditie-token uit een TAF (wind, zicht, weer, wolken, temperatuur)
+function tafDecodeToken(tok) {
+    let d;
+
+    // Wind
+    d = tok.match(/^(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?(KT|MPS|KMH)$/);
+    if (d) {
+        const unitName = d[5] == "KT" ? "knopen" : (d[5] == "MPS" ? "m/s" : "km/u");
+        const speedVal = parseInt(d[2], 10);
+        let desc;
+        if (d[1] == "VRB") {
+            desc = "Variabele windrichting";
+        } else {
+            desc = "Wind vanuit " + d[1] + "\u00b0 (" + degreesToCompass(parseInt(d[1], 10)) + ")";
+        }
+        desc += ", " + speedVal + " " + unitName;
+        if (d[5] == "KT") desc += " (~" + ktToKmh(speedVal) + " km/u)";
+        if (d[4]) desc += ", vlagen tot " + parseInt(d[4], 10) + " " + unitName;
+        return desc;
+    }
+
+    // Variatie windrichting
+    if (/^\d{3}V\d{3}$/.test(tok)) {
+        const vd = tok.match(/^(\d{3})V(\d{3})$/);
+        return "Windrichting varieert tussen " + vd[1] + "\u00b0 en " + vd[2] + "\u00b0";
+    }
+
+    // Zichtbaarheid
+    if (tok == "CAVOK") return "CAVOK: helder weer, zicht 10 km of meer, geen wolken onder 5000 ft";
+    if (/^\d{4}$/.test(tok)) {
+        const v = parseInt(tok, 10);
+        return "Zichtbaarheid " + (v >= 9999 ? "10 km of meer" : v + " meter");
+    }
+    if (/SM$/.test(tok)) {
+        return "Zichtbaarheid " + tok.replace("SM", " statute miles");
+    }
+
+    // RVR
+    if (/^R\d{2}[LCR]?\/(P|M)?\d{4}(V\d{4})?(FT)?$/.test(tok)) {
+        const rm = tok.match(/^R(\d{2})([LCR]?)\/(P|M)?(\d{4})/);
+        const baan = "baan " + rm[1] + (rm[2]=="L"?" links":(rm[2]=="R"?" rechts":(rm[2]=="C"?" centraal":"")));
+        const prefix = rm[3] == "P" ? "meer dan " : (rm[3] == "M" ? "minder dan " : "");
+        return "RVR " + baan + ": " + prefix + rm[4] + " meter";
+    }
+
+    // Geen significant weer
+    if (tok == "NSW") return "Geen significant weer meer";
+
+    // Wolken
+    const cw = decodeCloudGroup(tok);
+    if (cw) return cw;
+    if (tok == "SKC" || tok == "CLR" || tok == "NSC") return CLOUD_COVER[tok];
+
+    // Weer
+    const ww = decodeWeatherGroup(tok);
+    if (ww) return "Weerverschijnsel: " + ww;
+
+    // Minimum/maximum temperatuur (bijv. TX12/0415Z, TN04/0503Z)
+    const tx = tok.match(/^TX(M?\d{2})\/(\d{2})(\d{2})Z$/);
+    if (tx) return "Maximum temperatuur " + decodeTempValue(tx[1]) + "\u00b0C rond dag " +
+        tx[2] + ", " + tx[3] + ":00 UTC";
+    const tn = tok.match(/^TN(M?\d{2})\/(\d{2})(\d{2})Z$/);
+    if (tn) return "Minimum temperatuur " + decodeTempValue(tn[1]) + "\u00b0C rond dag " +
+        tn[2] + ", " + tn[3] + ":00 UTC";
+
+    return null;
+}
+
+function decodeTaf(raw) {
+    const lines = [];
+    let text = raw.replace(/\r/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+    if (text == "") return "";
+
+    // "TAF" en evt. "AMD"/"COR" prefix verwijderen
+    text = text.replace(/^TAF\s+/i, "");
+    text = text.replace(/^(AMD|COR)\s+/i, "");
+    text = text.replace(/^(AMD|COR)\s+/i, "");
+
+    const tokens = text.split(" ");
+    if (tokens.length < 2) return "";
+    let idx = 0;
+
+    // 1. Station
+    lines.push({ code: tokens[idx++], desc: "ICAO-vliegveldcode" });
+
+    // 2. Uitgiftetijdstip (ddhhmmZ)
+    const t = tokens[idx];
+    const tm = t.match(/^(\d{2})(\d{2})(\d{2})Z$/);
+    if (tm) {
+        lines.push({ code: t, desc: "TAF uitgegeven op dag " + tm[1] +
+            " van de maand, om " + tm[2] + ":" + tm[3] + " UTC" });
+        idx++;
+    }
+
+    // 3. Geldigheidsduur (ddhh/ddhh)
+    const g = tokens[idx];
+    if (g && /^\d{4}\/\d{4}$/.test(g)) {
+        lines.push({ code: g, desc: "Voorspelling geldig: " + fmtTafPeriod(g) });
+        idx++;
+    }
+
+    // 4. Basiscondities (tot aan het eerste FM/TEMPO/BECMG/PROB)
+    lines.push({ code: "", desc: "Basiscondities", sec: true });
+    while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (/^FM\d{6}$/.test(tok) || tok == "TEMPO" || tok == "BECMG" || /^PROB\d{2}$/.test(tok)) break;
+        const d = tafDecodeToken(tok);
+        if (d) {
+            lines.push({ code: tok, desc: d, sub: true });
+            idx++;
+        } else {
+            lines.push({ code: tok, desc: "(niet herkend)", sub: true });
+            idx++;
+        }
+    }
+
+    // 5. Veranderingsgroepen
+    while (idx < tokens.length) {
+        const tok = tokens[idx];
+        let header = null;
+
+        if (/^FM\d{6}$/.test(tok)) {
+            const fm = tok.match(/^FM(\d{2})(\d{2})(\d{2})$/);
+            header = "Vanaf dag " + fm[1] + ", " + fm[2] + ":" + fm[3] + " UTC (nieuwe volledige condities)";
+            idx++;
+        } else if (/^PROB\d{2}$/.test(tok)) {
+            const p = tok.match(/^PROB(\d{2})$/);
+            header = "Kans " + p[1] + "% op:";
+            idx++;
+            if (tokens[idx] == "TEMPO") { header = "Kans " + p[1] + "%, tijdelijk:"; idx++; }
+            if (tokens[idx] && /^\d{4}\/\d{4}$/.test(tokens[idx])) {
+                header += " (" + fmtTafPeriod(tokens[idx]) + ")";
+                idx++;
+            }
+        } else if (tok == "TEMPO" || tok == "BECMG") {
+            header = (tok == "TEMPO") ? "Tijdelijke fluctuaties:" : "Verandert geleidelijk in:";
+            idx++;
+            if (tokens[idx] && /^\d{4}\/\d{4}$/.test(tokens[idx])) {
+                header += " (" + fmtTafPeriod(tokens[idx]) + ")";
+                idx++;
+            }
+        } else {
+            // Onverwacht token overslaan (voorkomt vastlopers)
+            idx++;
+            continue;
+        }
+
+        lines.push({ code: "", desc: header, sec: true });
+
+        // Inhoud van deze groep duiden
+        while (idx < tokens.length) {
+            const t2 = tokens[idx];
+            if (/^FM\d{6}$/.test(t2) || t2 == "TEMPO" || t2 == "BECMG" || /^PROB\d{2}$/.test(t2)) break;
+            const dd = tafDecodeToken(t2);
+            if (dd) {
+                lines.push({ code: t2, desc: dd, sub: true });
+            } else {
+                lines.push({ code: t2, desc: "(niet herkend)", sub: true });
+            }
+            idx++;
+        }
+    }
+
+    return buildRows(lines);
+}
+
+// ===== Actueel ophalen =====
+
+const API_BASE = "https://aviationweather.gov/api/data/";
+// Publieke CORS-proxies als alternatieve route, mocht de directe verbinding
+// door de browser geblokkeerd worden (CORS). Wordt pas na een mislukte
+// directe poging geprobeerd, in deze volgorde.
+const PROXIES = [
+    u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+    u => "https://corsproxy.io/?url=" + encodeURIComponent(u)
+];
+
+// Nederlandse vliegvelden, gesplitst in burgerluchtvaart en militair.
+const NL_CIVIL = [
+    { code: "EHAM", name: "Amsterdam Airport Schiphol" },
+    { code: "EHRD", name: "Rotterdam The Hague Airport" },
+    { code: "EHEH", name: "Eindhoven Airport" },
+    { code: "EHBK", name: "Maastricht Aachen Airport" },
+    { code: "EHGG", name: "Groningen Airport Eelde" },
+    { code: "EHLE", name: "Lelystad Airport" },
+    { code: "EHTW", name: "Twente Airport (Enschede)" },
+    { code: "EHSE", name: "Breda International Airport (Seppe)" },
+    { code: "EHAL", name: "Ameland Airport" },
+    { code: "EHTX", name: "Texel International Airport" },
+    { code: "EHHO", name: "Hoogeveen Airport" },
+    { code: "EHDR", name: "Drachten Airfield" },
+    { code: "EHOW", name: "Oostwold Airport" },
+    { code: "EHTE", name: "Teuge Airport" },
+    { code: "EHHV", name: "Hilversum Airport" },
+    { code: "EHBD", name: "Kempen Airport (Budel)" },
+    { code: "EHMZ", name: "Midden-Zeeland Airport" },
+    { code: "EHTL", name: "Terlet Airfield (zweefvliegveld)" }
+];
+
+const NL_MILITARY = [
+    { code: "EHGR", name: "Vliegbasis Gilze-Rijen" },
+    { code: "EHVK", name: "Vliegbasis Volkel" },
+    { code: "EHLW", name: "Vliegbasis Leeuwarden" },
+    { code: "EHWO", name: "Vliegbasis Woensdrecht" },
+    { code: "EHKD", name: "Vliegveld De Kooy (Den Helder)" },
+    { code: "EHDL", name: "Vliegbasis Deelen" },
+    { code: "EHDP", name: "De Peel (Venray)" },
+    { code: "EHMC", name: "Nieuw-Milligen (AOCS)" }
+];
+
+// Genereert de opties voor de keuzelijst in de pagina
+function fillAirportSelect() {
+    const sel = document.getElementById("airportSelect");
+    if (!sel) return;
+    let html = "";
+
+    html += "<optgroup label='Burgerluchtvaart'>";
+    for (const a of NL_CIVIL) {
+        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
+    }
+    html += "</optgroup>";
+
+    html += "<optgroup label='Militair'>";
+    for (const a of NL_MILITARY) {
+        html += "<option value='" + a.code + "'>" + a.code + " \u2014 " + a.name + "</option>";
+    }
+    html += "</optgroup>";
+
+    sel.innerHTML = html;
+    sel.value = "EHAM";
+}
+
+function stationNaam(station) {
+    for (const a of NL_CIVIL) {
+        if (a.code == station) return a.name + " (" + station + ")";
+    }
+    for (const a of NL_MILITARY) {
+        if (a.code == station) return a.name + " (" + station + ")";
+    }
+    return station;
+}
+
+// Bepaalt welk station opgehaald wordt:
+// 1. het vrije invoervakje als daarin een geldige ICAO-code staat
+// 2. anders de keuzelijst met Nederlandse vliegvelden
+function getCurrentStation() {
+    const inp = document.getElementById("icaoInput");
+    let val = "";
+    if (inp) val = inp.value.replace(/^\s+|\s+$/g, "").toUpperCase();
+    if (/^[A-Z]{4}$/.test(val)) return val;
+    const sel = document.getElementById("airportSelect");
+    if (sel) return sel.value;
+    return "EHAM";
+}
+
+// Haalt tekst op: eerst rechtstreeks, daarna (bij CORS-/netwerkproblemen)
+// automatisch via de proxies uit de lijst hierboven.
+async function fetchTextWithFallback(url) {
+    let lastErr = null;
+    try {
+        const resp = await fetch(url);
+        if (resp.ok) return await resp.text();
+        throw new Error("HTTP-status " + resp.status);
+    } catch (e) {
+        lastErr = e;
+    }
+    for (const makeProxyUrl of PROXIES) {
+        try {
+            const resp = await fetch(makeProxyUrl(url));
+            if (resp.ok) return await resp.text();
+        } catch (e) {
+            lastErr = e;
+        }
+    }
+    throw lastErr;
+}
+
+async function fetchAviation(station, kind) {
+    const out = document.getElementById("output");
+    const inp = document.getElementById("metarInput");
+    const btnMetar = document.getElementById("btnFetchMetar");
+    const btnTaf = document.getElementById("btnFetchTaf");
+
+    const soort = (kind == "taf") ? "TAF" : "METAR";
+    out.innerHTML = "<span class='ok'>" + escapeHtml(soort) + " voor " +
+                    escapeHtml(stationNaam(station)) + " wordt opgehaald...</span>";
+
+    // Knoppen tijdelijk uitschakelen tijdens het ophalen
+    btnMetar.disabled = true;
+    btnTaf.disabled = true;
+
+    try {
+        const url = API_BASE + ((kind == "taf") ? "taf" : "metar") +
+                    "?ids=" + encodeURIComponent(station) + "&format=raw";
+        const data0 = await fetchTextWithFallback(url);
+
+        let data = data0;
+        if (kind == "metar") {
+            // METAR: alleen de eerste regel gebruiken
+            data = data.replace(/^\s+|\s+$/g, "");
+            if (data.indexOf("\n") > -1) data = data.substring(0, data.indexOf("\n")).replace(/\r/, "");
+            data = data.replace(/\s+$/, "");
+        } else {
+            // TAF: kan over meerdere regels komen, samenvoegen tot 1 tekst
+            data = data.replace(/\r/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+        }
+
+        if (data == "" || data.indexOf("<") == 0) {
+            out.innerHTML = "<span class='err'>Geen geldige " + escapeHtml(soort) +
+                " ontvangen. Mogelijk levert dit veld geen " + escapeHtml(soort) +
+                " of is de dienst tijdelijk onbereikbaar.</span>";
+            return;
+        }
+
+        inp.value = data;
+        doDecode();
+        const bron = (soort == "TAF")
+            ? "Opgehaald van aviationweather.gov (FAA/NWS). Let op: een TAF is een verwachting en kan tussentijds gewijzigd (amended) worden."
+            : "Opgehaald van aviationweather.gov (databron FAA/NWS). Let op: de METAR kan tot ca. 10 minuten oud zijn.";
+        out.innerHTML = "<div class='example'>" + bron + "</div>" + out.innerHTML;
+    } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        out.innerHTML = "<span class='err'>Kon geen verbinding maken: " + escapeHtml(msg) +
+            "<br><br>Dit komt meestal doordat de browser het ophalen vanaf een lokale pagina " +
+            "beveiligt (CORS). Mogelijke oplossingen:<br>" +
+            "&#8226; Zet het bestand op een webserver (bijv. GitHub Pages of een eigen site), dan werkt het rechtstreeks.<br>" +
+            "&#8226; Of gebruik de pagina via een klein lokaal serverprogramma, bijv.: <code>python -m http.server</code> " +
+            "in de map van het bestand, en open dan http://localhost:8000/<br>" +
+            "&#8226; Of plak de METAR/TAF handmatig vanaf aviationweather.gov.</span>";
+    } finally {
+        btnMetar.disabled = false;
+        btnTaf.disabled = false;
+    }
+}
+
+function fetchSelected(kind) {
+    fetchAviation(getCurrentStation(), kind);
+}
+
+// ===== UI =====
+
+function doDecode() {
+    const out = document.getElementById("output");
+    const inp = document.getElementById("metarInput");
+    if (inp.value.replace(/\s/g, "") == "") {
+        out.innerHTML = "<span class='err'>Plak eerst een METAR of TAF in het invoerveld.</span>";
+        return;
+    }
+    // Vanzelf herkennen of het een TAF is (begint met TAF / TAF AMD / TAF COR)
+    const isTaf = /^\s*TAF(\s+(AMD|COR))?/i.test(inp.value);
+    const html = isTaf ? decodeTaf(inp.value) : decodeMetar(inp.value);
+    if (html == "") {
+        out.innerHTML = "<span class='err'>Kon de invoer niet uitlezen. Controleer de tekst.</span>";
+    } else {
+        out.innerHTML = html;
+    }
+}
+
+function doExampleMetar() {
+    document.getElementById("metarInput").value =
+        "EHAM 041325Z 06016KT 030V100 9999 FEW022 10/05 Q1030 NOSIG";
+    doDecode();
+}
+
+function doExampleTaf() {
+    document.getElementById("metarInput").value =
+        "TAF EHRD 041100Z 0412/0512 22012KT 9999 SCT030 " +
+        "TEMPO 0418/0421 6000 -RA BKN012 " +
+        "BECMG 0503/0505 25008KT " +
+        "FM051200 9999 SCT020 TX12/0415Z TN04/0503Z";
+    doDecode();
+}
+
+window.addEventListener("load", function() {
+    fillAirportSelect();
+});
+</script>
+</body>
+</html>
