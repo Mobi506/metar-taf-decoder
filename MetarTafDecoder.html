@@ -74,7 +74,7 @@
     <div class="example">Kies een vliegveld uit de lijst of typ een eigen ICAO-code (4 letters) en klik daarna op <strong>METAR ophalen</strong> of <strong>TAF ophalen</strong>.<br>
     Staat er een geldige code in het invulvakje, dan gaat die voor; is het vakje leeg, dan wordt het gekozen vliegveld gebruikt.<br>
     Je kunt ook gewoon handmatig een METAR of TAF plakken; de Decoderen-knop herkent zelf welke van de twee het is.<br>
-    Let op: niet alle kleine velden leveren een TAF; dan blijft het antwoord leeg.<br>
+    Let op: de automatische ophaaldata (rechts) geldt momenteel alleen voor Nederlandse vliegvelden; voor buitenlandse codes werkt de handmatige modus altijd.<br>
     Meerdere rapporten tegelijk worden niet ondersteund (&#233;&#233;n per keer).</div>
     <div id="output" class="output"></div>
 </div>
@@ -517,7 +517,7 @@ function decodeTaf(raw) {
             header = (tok == "TEMPO") ? "Tijdelijke fluctuaties:" : "Verandert geleidelijk in:";
             idx++;
             if (tokens[idx] && /^\d{4}\/\d{4}$/.test(tokens[idx])) {
-                header += " (" + fmtTafPeriod(tokens[idx]) + ")";
+                header += " (" + fmtTafPeriod(tokens[idx]) + ")");
                 idx++;
             }
         } else {
@@ -547,23 +547,26 @@ function decodeTaf(raw) {
 
 // ===== Actueel ophalen =====
 
-// Databronnen:
-// - METAR primair via metar.vatsim.net: levert dezelfde (NOAA-)METARs als
-//   platte tekst en staat browserpagina's (CORS) officieel toe.
-// - TAF en de reserve-METAR-route via aviationweather.gov; die dienst
-//   staat geen directe browserverbindingen toe, dus die gaan via
-//   publieke omleidingsservers (proxies). Die wisselen regelmatig van
-//   beschikbaarheid, vandaar meerdere routes + diagnose-overzicht.
+// Route 1 (beste): de JSON-bestanden met actuele METARs/TAFs die door de
+// GitHub Actions-workflow (.github/workflows/update-weather.yml) elke
+// 30 minuten in deze repository worden bijgewerkt. Zelfde domein als
+// deze pagina, dus altijd en overal toegestaan - geen CORS-problemen.
+// Route 2 (alleen METAR): metar.vatsim.net - browser-vriendelijk.
+// Route 3 (reserve): FAA API via publieke proxies (onbetrouwbaar).
 const VATSIM_METAR = "https://metar.vatsim.net/";
 const AW_API_BASE = "https://aviationweather.gov/api/data/";
 
 const PROXY_ROUTES = [
     { name: "codetabs", make: u => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u) },
-    { name: "allorigins", make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) },
-    { name: "whateverorigin", make: u => "https://www.whateverorigin.org/get?url=" + encodeURIComponent(u) }
+    { name: "allorigins", make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) }
 ];
 
-// Timeout-wrapper zodat een hangende proxy de app niet vastzet.
+// Cache-buster zodat de browser niet een oud JSON-bestand gebruikt.
+function bustCache(url) {
+    return url + (url.indexOf("?") > -1 ? "&" : "?") + "t=" + Date.now();
+}
+
+// Timeout-wrapper zodat een hangende route de app niet vastzet.
 function fetchWithTimeout(url, ms) {
     return Promise.race([
         fetch(url),
@@ -594,6 +597,16 @@ async function tryRoutes(routes) {
         }
     }
     throw { message: verslagen.join("\n") };
+}
+
+// Probeert de workflow-JSON te laden en de gevraagde station eruit te halen.
+async function haalUitWorkflowJson(bestand, station) {
+    const resp = await fetchWithTimeout(bustCache(bestand), 8000);
+    if (!resp.ok) throw new Error("HTTP-status " + resp.status);
+    const obj = await resp.json();
+    const raw = obj[station];
+    if (!raw) throw new Error("station niet aanwezig in " + bestand);
+    return raw;
 }
 
 // Nederlandse vliegvelden, gesplitst in burgerluchtvaart en militair.
@@ -688,52 +701,61 @@ async function fetchAviation(station, kind) {
     btnMetar.disabled = true;
     btnTaf.disabled = true;
 
+    const verslagen = [];
+    let data = null;
+
     try {
-        // Routes samenstellen. METAR: eerst vatsim (browser-vriendelijk),
-        // daarna aviationweather via proxies. TAF: alleen aviationweather
-        // via proxies (vatsim levert geen TAFs).
-        const awUrl = AW_API_BASE + ((kind == "taf") ? "taf" : "metar") +
-                      "?ids=" + encodeURIComponent(station) + "&format=raw";
-
-        const routes = [];
-        if (kind == "metar") {
-            routes.push({ name: "vatsim (metar.vatsim.net)", url: VATSIM_METAR + encodeURIComponent(station) });
-        }
-        for (const p of PROXY_ROUTES) {
-            routes.push({ name: "FAA via " + p.name, url: p.make(awUrl) });
+        // Route 1: eigen workflow-JSON (betrouwbaar, geen CORS)
+        const bestand = (kind == "taf") ? "tafs.json" : "metars.json";
+        try {
+            data = await haalUitWorkflowJson(bestand, station);
+            verslagen.push("repo-data (" + bestand + "): OK");
+        } catch (e) {
+            const msg = (e && e.message) ? e.message : String(e);
+            verslagen.push("repo-data (" + bestand + "): " + msg);
         }
 
-        const result = await tryRoutes(routes);
-        let data = result.text;
+        // Route 2 en verder
+        if (data === null) {
+            const awUrl = AW_API_BASE + kind + "?ids=" + encodeURIComponent(station) + "&format=raw";
+            const routes = [];
+            if (kind == "metar") {
+                routes.push({ name: "vatsim (metar.vatsim.net)", url: VATSIM_METAR + encodeURIComponent(station) });
+            }
+            for (const p of PROXY_ROUTES) {
+                routes.push({ name: "FAA via " + p.name, url: p.make(awUrl) });
+            }
+            const result = await tryRoutes(routes);
+            data = result.text;
+            for (const d of result.diag) verslagen.push(d);
 
-        if (kind == "metar") {
-            // METAR: alleen de eerste regel gebruiken
-            data = data.replace(/^\s+|\s+$/g, "");
-            if (data.indexOf("\n") > -1) data = data.substring(0, data.indexOf("\n")).replace(/\r/, "");
-            data = data.replace(/\s+$/, "");
-        } else {
-            // TAF: kan over meerdere regels komen, samenvoegen tot 1 tekst
-            data = data.replace(/\r/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+            if (kind == "metar") {
+                data = data.replace(/^\s+|\s+$/g, "");
+                if (data.indexOf("\n") > -1) data = data.substring(0, data.indexOf("\n")).replace(/\r/, "");
+                data = data.replace(/\s+$/, "");
+            } else {
+                data = data.replace(/\r/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+            }
         }
 
-        if (data == "" || data.indexOf("<") == 0) {
+        if (data === null || data == "" || data.indexOf("<") == 0) {
             out.innerHTML = "<span class='err'>Geen geldige " + escapeHtml(soort) +
                 " ontvangen. Mogelijk levert dit veld geen " + escapeHtml(soort) +
-                " of is de dienst tijdelijk onbereikbaar.</span>" +
-                "<div class='diag'>" + escapeHtml(result.diag.join("\n")) + "</div>";
+                " of zijn alle bronnen tijdelijk onbereikbaar.</span>" +
+                "<div class='diag'>" + escapeHtml(verslagen.join("\n")) + "</div>";
             return;
         }
 
         inp.value = data;
         doDecode();
         const bron = (soort == "TAF")
-            ? "Opgehaald van aviationweather.gov (FAA/NWS). Let op: een TAF is een verwachting en kan tussentijds gewijzigd (amended) worden."
+            ? "Opgehaald (FAA/NWS-databron; kan tussentijds gewijzigd/amended worden)."
             : "Opgehaald (NOAA-databron). Let op: de METAR kan tot ca. 10 minuten oud zijn.";
         out.innerHTML = "<div class='example'>" + bron + "</div>" + out.innerHTML;
     } catch (e) {
         const msg = (e && e.message) ? e.message : String(e);
         out.innerHTML = "<span class='err'>Ophalen mislukt \u2014 diagnose per route:</span>" +
-            "<div class='diag'>" + escapeHtml(msg) + "</div>" +
+            "<div class='diag'>" + escapeHtml([verslagen.join("\n"), msg].join("\n")) + "</div>" +
             "<div class='example'>Lukt opnieuw proberen niet, plak de " + escapeHtml(soort) +
             " dan handmatig: ga naar aviationweather.gov en kopieer de tekstregel in het invoerveld hierboven.</div>";
     } finally {
