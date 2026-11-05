@@ -575,18 +575,15 @@ function decodeTaf(raw) {
 const VATSIM_METAR = "https://metar.vatsim.net/";
 const AW_API_BASE = "https://aviationweather.gov/api/data/";
 
-const NL_CIVIL = [
-    { code: "EHAM", name: "Amsterdam Airport Schiphol" },
-    { code: "EHRD", name: "Rotterdam The Hague Airport" },
-    { code: "EHEH", name: "Eindhoven Airport" },
-    { code: "EHBK", name: "Maastricht Aachen Airport" },
-    { code: "EHGG", name: "Groningen Airport Eelde" },
-    { code: "EHLE", name: "Lelystad Airport" },
-];
-
-const NL_MILITARY = [
-    { code: "EHKD", name: "Vliegveld De Kooy (Den Helder)" },
-];
+const STATION_NAMEN = {
+    "EHAM": "Amsterdam Airport Schiphol",
+    "EHRD": "Rotterdam The Hague Airport",
+    "EHEH": "Eindhoven Airport",
+    "EHBK": "Maastricht Aachen Airport",
+    "EHGG": "Groningen Airport Eelde",
+    "EHLE": "Lelystad Airport",
+    "EHKD": "Vliegveld De Kooy (Den Helder)"
+};
 
 const PROXY_ROUTES = [
     { name: "codetabs", make: u => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u) },
